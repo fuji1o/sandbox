@@ -1,0 +1,27 @@
+# Результаты сборки
+output/
+bin/
+src/backend/app
+*.exe
+
+# Фронтенд
+node_modules/
+dist/
+build/
+
+# Архивы артефактов
+*.tar.gz
+*.gzip
+*.zip
+
+# Секреты и локальные настройки
+.env
+*.env
+*.pem
+id_rsa*
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
