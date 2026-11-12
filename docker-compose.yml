@@ -1,0 +1,29 @@
+name: sandbox
+
+services:
+  backend:
+    image: ${NEXUS_REGISTRY}/${NEXUS_BACKEND_REPOSITORY}/sandbox-backend:latest
+    container_name: sandbox-backend
+    env_file:
+      - .env
+    networks:
+      - sandbox-net
+    restart: unless-stopped
+
+  frontend:
+    image: ${NEXUS_REGISTRY}/${NEXUS_FRONTEND_REPOSITORY}/sandbox-frontend:latest
+    container_name: sandbox-frontend
+    env_file:
+      - .env
+    ports:
+      - "${FRONTEND_PORT:-8888}:8888"
+    depends_on:
+      - backend
+    networks:
+      - sandbox-net
+    restart: unless-stopped
+
+networks:
+  sandbox-net:
+    name: sandbox-net
+    driver: bridge
