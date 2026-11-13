@@ -1,4 +1,4 @@
-#!/bin/shgit
+#!/bin/sh
 set -eu
 
 cd "$(dirname "$0")"
@@ -13,7 +13,7 @@ set +a
 
 HEALTH_URL="${HEALTH_URL:-http://localhost:${FRONTEND_PORT:-8888}/products}"
 HEALTH_TRIES="${HEALTH_TRIES:-30}"
-
+    
 echo "==> Вход в registry ${IMAGE_REGISTRY}"
 docker login "$IMAGE_REGISTRY" -u "$REGISTRY_USER" --password-stdin
 
