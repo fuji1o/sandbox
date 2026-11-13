@@ -1,5 +1,3 @@
-# Сборка образов backend и frontend и публикация в два registry:
-
 name: build
 
 on:
@@ -19,7 +17,11 @@ on:
 
 permissions:
   contents: read
-  packages: write 
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   version:
@@ -33,7 +35,6 @@ jobs:
           INPUT_VERSION: ${{ inputs.VERSION }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
-            # ручной запуск с версией: только деплой, без сборки
             echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
             echo "Повторный деплой версии **$INPUT_VERSION**" >> "$GITHUB_STEP_SUMMARY"
@@ -44,9 +45,58 @@ jobs:
             echo "Версия сборки: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  build:
+  test:
     needs: version
     if: needs.version.outputs.rebuild == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            workdir: /src
+            test_cmd: |
+              set -e
+              go install github.com/jstemmer/go-junit-report/v2@v2.1.0
+              set +e
+              CGO_ENABLED=0 go test -v -coverprofile=/reports/coverage.out ./... > /reports/test.log 2>&1
+              rc=$?
+              set -e
+              "$(go env GOPATH)/bin/go-junit-report" < /reports/test.log > /reports/junit.xml
+              [ -f /reports/coverage.out ] && go tool cover -func=/reports/coverage.out > /reports/coverage.txt || true 
+              exit $rc
+
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Собрать builder-стадию
+        run: docker build --target builder -t test-${{ matrix.service }}:ci "src/${{ matrix.service }}"
+
+      - name: Запустить тесты в контейнере
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD/reports:/reports" \
+            -w "${{ matrix.workdir }}" \
+            -e JEST_JUNIT_OUTPUT_DIR=/reports \
+            -e JEST_JUNIT_OUTPUT_NAME=junit.xml \
+            test-${{ matrix.service }}:ci \
+            sh -c "$TEST_CMD"
+        env:
+          TEST_CMD: ${{ matrix.test_cmd }}
+
+      - name: Опубликовать отчёты
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service }}-test-reports
+          path: reports/
+          if-no-files-found: warn
+
+  build:
+    needs: [version, test]
+    if: needs.version.outputs.rebuild == 'true' && needs.test.result == 'success'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -87,7 +137,6 @@ jobs:
         run: |
           NEXUS_IMAGE="$NEXUS_HOST/${{ matrix.nexus_repo }}/sandbox-${{ matrix.service }}"
           SHA_TAG="sha-${GITHUB_SHA::7}"
-          # $VERSION и sha-* — всегда; latest — только для main
           TAGS="$VERSION $SHA_TAG"
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             TAGS="$TAGS latest"
@@ -127,13 +176,14 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ---------- 3. Деплой на VM: только main ----------
+  # ---- Деплой (concurrency уже был) ----
   deploy:
-    needs: [version, build]
+    needs: [version, test, build]
     if: >-
       always() &&
       github.ref == 'refs/heads/main' &&
       needs.version.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     environment: production
@@ -210,7 +260,6 @@ jobs:
           else
             USER_NAME="$NEXUS_USER"; PASS="$NEXUS_PASS"
           fi
-          # пароль уходит через stdin: не попадает ни в лог, ни в командную строку
           printf '%s' "$PASS" | ssh vm "REGISTRY_USER='$USER_NAME' sh ~/$APP_DIR/deploy.sh"
 
       - name: Итог
