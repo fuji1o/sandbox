@@ -22,7 +22,7 @@ jobs:
     steps:
       - id: v
         run: |
-          VERSION="1.0.${{ github.run_number }}"
+          VERSION=$(date -u +%Y%m%d-%H%M%S)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Версия сборки: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
 
@@ -64,31 +64,46 @@ jobs:
           NEXUS_PASS: ${{ secrets.NEXUS_REPO_PASS }}
         run: printf '%s' "$NEXUS_PASS" | docker login "$NEXUS_HOST" -u "$NEXUS_USER" --password-stdin
 
-      - name: Сборка образа
+      - name: Сформировать теги
         run: |
           NEXUS_IMAGE="$NEXUS_HOST/${{ matrix.nexus_repo }}/sandbox-${{ matrix.service }}"
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+          # $VERSION и sha-* — всегда; latest — только для main
+          TAGS="$VERSION $SHA_TAG"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAGS="$TAGS latest"
+          fi
           echo "NEXUS_IMAGE=$NEXUS_IMAGE" >> "$GITHUB_ENV"
+          echo "TAGS=$TAGS" >> "$GITHUB_ENV"
+          echo "Теги: $TAGS"
+
+      - name: Сборка образа
+        run: |
+          ARGS=""
+          for t in $TAGS; do
+            ARGS="$ARGS -t $GHCR_IMAGE:$t -t $NEXUS_IMAGE:$t"
+          done
           docker build --target runtime \
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             --label "org.opencontainers.image.version=$VERSION" \
-            -t "$GHCR_IMAGE:$VERSION" -t "$GHCR_IMAGE:latest" \
-            -t "$NEXUS_IMAGE:$VERSION" -t "$NEXUS_IMAGE:latest" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            $ARGS \
             "src/${{ matrix.service }}"
 
       - name: Публикация в ghcr.io
         run: |
-          docker push "$GHCR_IMAGE:$VERSION"
-          docker push "$GHCR_IMAGE:latest"
+          for t in $TAGS; do docker push "$GHCR_IMAGE:$t"; done
 
       - name: Публикация в Nexus
         run: |
-          docker push "$NEXUS_IMAGE:$VERSION"
-          docker push "$NEXUS_IMAGE:latest"
+          for t in $TAGS; do docker push "$NEXUS_IMAGE:$t"; done
 
       - name: Итог
         run: |
           {
             echo "### ${{ matrix.service }} — $VERSION"
-            echo "- \`$GHCR_IMAGE:$VERSION\`"
-            echo "- \`$NEXUS_IMAGE:$VERSION\`"
+            for t in $TAGS; do
+              echo "- \`$GHCR_IMAGE:$t\`"
+              echo "- \`$NEXUS_IMAGE:$t\`"
+            done
           } >> "$GITHUB_STEP_SUMMARY"
