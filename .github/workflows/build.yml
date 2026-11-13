@@ -8,7 +8,14 @@ on:
     paths:
       - "src/**"
       - ".github/workflows/build.yml"
+      - "docker-compose.yml"
+      - "deploy.sh"
   workflow_dispatch:
+    inputs:
+      VERSION:
+        description: "Версия для повторного деплоя или отката (например, 20261111-101500). Пусто — собрать новую."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -19,15 +26,27 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      rebuild: ${{ steps.v.outputs.rebuild }}
     steps:
       - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.VERSION }}
         run: |
-          VERSION=$(date -u +%Y%m%d-%H%M%S)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Версия сборки: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$INPUT_VERSION" ]; then
+            # ручной запуск с версией: только деплой, без сборки
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+            echo "Повторный деплой версии **$INPUT_VERSION**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            VERSION=$(date -u +%Y%m%d-%H%M%S)
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            echo "Версия сборки: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build:
     needs: version
+    if: needs.version.outputs.rebuild == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -107,3 +126,93 @@ jobs:
               echo "- \`$NEXUS_IMAGE:$t\`"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- 3. Деплой на VM: только main ----------
+  deploy:
+    needs: [version, build]
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.version.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REGISTRY_KIND: ${{ vars.IMAGE_REGISTRY || 'nexus' }}
+      NEXUS_PREFIX: kashapova
+      APP_DIR: sandbox
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Настроить SSH
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          VM_SSH_KNOWN_HOSTS: ${{ secrets.VM_SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$VM_SSH_KEY" | tr -d '\r' > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$VM_SSH_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+          printf 'Host vm\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/id_deploy\n  StrictHostKeyChecking yes\n' \
+            "$VM_HOST" "$VM_USER" > ~/.ssh/config
+
+      - name: Сформировать .env
+        env:
+          APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
+          NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          case "$REGISTRY_KIND" in
+            ghcr)
+              IMAGE_REGISTRY="ghcr.io"
+              REPO_BACKEND="ghcr.io/$OWNER/sandbox-backend"
+              REPO_FRONTEND="ghcr.io/$OWNER/sandbox-frontend"
+              ;;
+            nexus)
+              IMAGE_REGISTRY="$NEXUS_HOST"
+              REPO_BACKEND="$NEXUS_HOST/$NEXUS_PREFIX-backend-docker/sandbox-backend"
+              REPO_FRONTEND="$NEXUS_HOST/$NEXUS_PREFIX-frontend-docker/sandbox-frontend"
+              ;;
+            *) echo "IMAGE_REGISTRY должен быть nexus или ghcr" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$APP_ENV_FILE" | tr -d '\r' \
+            | grep -vE '^(IMAGE_REGISTRY|IMAGE_TAG|VERSION|REPOSITORY_BACKEND|REPOSITORY_FRONTEND)=' > .env || true
+          {
+            echo "IMAGE_REGISTRY=$IMAGE_REGISTRY"
+            echo "REPOSITORY_BACKEND=$REPO_BACKEND"
+            echo "REPOSITORY_FRONTEND=$REPO_FRONTEND"
+            echo "IMAGE_TAG=$VERSION"
+            echo "VERSION=$VERSION"
+          } >> .env
+          echo "Registry для деплоя: $REGISTRY_KIND, версия $VERSION"
+
+      - name: Скопировать файлы на VM
+        run: |
+          ssh vm "mkdir -p ~/$APP_DIR"
+          scp docker-compose.yml .env deploy.sh vm:~/$APP_DIR/
+
+      - name: Развернуть и проверить
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_REPO_USER }}
+          NEXUS_PASS: ${{ secrets.NEXUS_REPO_PASS }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ "$REGISTRY_KIND" = "ghcr" ]; then
+            USER_NAME="$OWNER"; PASS="$GHCR_PAT"
+          else
+            USER_NAME="$NEXUS_USER"; PASS="$NEXUS_PASS"
+          fi
+          # пароль уходит через stdin: не попадает ни в лог, ни в командную строку
+          printf '%s' "$PASS" | ssh vm "REGISTRY_USER='$USER_NAME' sh ~/$APP_DIR/deploy.sh"
+
+      - name: Итог
+        run: |
+          echo "Развёрнута версия **$VERSION** (registry $REGISTRY_KIND)" >> "$GITHUB_STEP_SUMMARY"
