@@ -67,6 +67,20 @@ jobs:
           yc config profile create default
           yc config set service-account-key "$RUNNER_TEMP/yc-sa-key.json" --profile default
           yc iam create-token --profile default --no-browser >/dev/null
+          kubeconfig="$HOME/.kube/config"
+          kubectl --kubeconfig "$kubeconfig" config view --raw -o json \
+            | python3 -c '
+          import json
+          import sys
+          
+          context_name, yc_executable = sys.argv[1:]
+          config = json.load(sys.stdin)
+          context = next(item["context"] for item in config["contexts"] if item["name"] == context_name)
+          user = next(item["user"] for item in config["users"] if item["name"] == context["user"])
+          user["exec"]["command"] = yc_executable
+          json.dump(config, sys.stdout)
+          ' "$KUBE_CONTEXT" "$(command -v yc)" > "$kubeconfig.tmp"
+          mv "$kubeconfig.tmp" "$kubeconfig"
 
       - name: Разрешить доступ к API с IP этого запуска
         id: allow_runner_ip
