@@ -1,0 +1,13 @@
+image:
+  tag: latest
+  backend: ghcr.io/fuji1o/sandbox-backend
+  frontend: ghcr.io/fuji1o/sandbox-frontend
+
+ports:
+  backend: 8081
+  frontend: 8888
+  nodePort: 30080
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: 500m, memory: 512Mi }

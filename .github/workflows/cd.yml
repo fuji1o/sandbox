@@ -1,0 +1,100 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      VERSION:
+        description: "Тег обоих образов из CI (например, 20261119-214623)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-k8s-lab-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      SECURITY_GROUP_ID: enp39s1gd11cege6768b
+      RULE_DESCRIPTION: sandbox-cd-${{ github.run_id }}-${{ github.run_attempt }}
+      KUBE_CONTEXT: yc-k8s-lab
+      NAMESPACE: default
+    steps:
+      - name: Получить Helm-чарт
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Проверить тег образов
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Укажи тег обоих образов из успешной сборки CI."
+            exit 1
+          fi
+
+      - name: Установить Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v4.3.2
+
+      - name: Установить yc
+        run: |
+          curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh \
+            | bash -s -- -i "$RUNNER_TEMP/yc" -n
+          echo "$RUNNER_TEMP/yc/bin" >> "$GITHUB_PATH"
+
+      - name: Настроить доступ к Yandex Cloud и Kubernetes
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          YC_SA_KEY: ${{ secrets.YC_SA_KEY }}
+        run: |
+          : "${KUBE_CONFIG:?Добавь секрет KUBE_CONFIG в GitHub}"
+          : "${YC_SA_KEY:?Добавь секрет YC_SA_KEY в GitHub}"
+          umask 077
+          mkdir -p "$HOME/.kube"
+          printf '%s\n' "$KUBE_CONFIG" > "$HOME/.kube/config"
+          printf '%s\n' "$YC_SA_KEY" > "$RUNNER_TEMP/yc-sa-key.json"
+          yc config profile create default
+          yc config set service-account-key "$RUNNER_TEMP/yc-sa-key.json" --profile default
+          yc iam create-token --profile default --no-browser >/dev/null
+
+      - name: Разрешить доступ к API с IP этого запуска
+        id: allow_runner_ip
+        run: |
+          runner_ip=$(curl -4 -fsS --retry 2 --max-time 10 https://api.ipify.org)
+          python3 -c 'import ipaddress, sys; ipaddress.IPv4Address(sys.argv[1])' "$runner_ip"
+          yc vpc security-group update-rules "$SECURITY_GROUP_ID" \
+            --add-rule "description=$RULE_DESCRIPTION,direction=ingress,protocol=tcp,port=443,v4-cidrs=[$runner_ip/32]" >/dev/null
+
+      - name: Развернуть версию через Helm
+        env:
+          VERSION: ${{ inputs.VERSION }}
+        run: |
+          helm upgrade --install sandbox ./helm/sandbox \
+            --kube-context "$KUBE_CONTEXT" --namespace "$NAMESPACE" \
+            --set-string "image.tag=$VERSION" --force-conflicts \
+            --rollback-on-failure --wait --timeout 5m
+          echo "Развёрнут тег образов **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Удалить временное правило доступа
+        if: ${{ always() && steps.allow_runner_ip.outcome != 'skipped' }}
+        run: |
+          rules=$(yc vpc security-group get "$SECURITY_GROUP_ID" --format json)
+          rule_ids=$(jq -r --arg description "$RULE_DESCRIPTION" \
+            '.rules[]? | select(.description == $description) | .id' <<< "$rules")
+          while IFS= read -r rule_id; do
+            if [[ -n "$rule_id" ]]; then
+              yc vpc security-group update-rules "$SECURITY_GROUP_ID" \
+                --delete-rule-id "$rule_id" >/dev/null
+            fi
+          done <<< "$rule_ids"
