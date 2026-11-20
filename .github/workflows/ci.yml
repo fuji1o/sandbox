@@ -82,70 +82,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: backend
-            nexus_repo: kashapova-backend-docker
-          - service: frontend
-            nexus_repo: kashapova-frontend-docker
+        service: [backend, frontend]
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      NEXUS_HOST: ${{ secrets.NEXUS_HOST }}
       GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.service }}
     steps:
       - name: Получить код
         uses: actions/checkout@v4
-
-      - name: Разрешить Docker работать с Nexus по HTTP
-        run: |
-          f=/etc/docker/daemon.json
-          [ -f "$f" ] || echo '{}' | sudo tee "$f" > /dev/null
-          sudo jq --arg r "$NEXUS_HOST" '. + {"insecure-registries": [$r]}' "$f" | sudo tee "$f.new" > /dev/null
-          sudo mv "$f.new" "$f"
-          sudo systemctl restart docker
 
       - name: Вход в ghcr.io
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Вход в Nexus
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_REPO_USER }}
-          NEXUS_PASS: ${{ secrets.NEXUS_REPO_PASS }}
-        run: printf '%s' "$NEXUS_PASS" | docker login "$NEXUS_HOST" -u "$NEXUS_USER" --password-stdin
-
       - name: Сформировать теги
         run: |
-          NEXUS_IMAGE="$NEXUS_HOST/${{ matrix.nexus_repo }}/sandbox-${{ matrix.service }}"
           SHA_TAG="sha-${GITHUB_SHA::7}"
           TAGS="$VERSION $SHA_TAG"
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             TAGS="$TAGS latest"
           fi
-          echo "NEXUS_IMAGE=$NEXUS_IMAGE" >> "$GITHUB_ENV"
           echo "TAGS=$TAGS" >> "$GITHUB_ENV"
           echo "Теги: $TAGS"
 
       - name: Сборка образа
         run: |
-          ARGS=""
+          args=()
           for t in $TAGS; do
-            ARGS="$ARGS -t $GHCR_IMAGE:$t -t $NEXUS_IMAGE:$t"
+            args+=(-t "$GHCR_IMAGE:$t")
           done
           docker build --target runtime \
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             --label "org.opencontainers.image.version=$VERSION" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            $ARGS \
+            "${args[@]}" \
             "src/${{ matrix.service }}"
 
       - name: Публикация в ghcr.io
         run: |
           for t in $TAGS; do docker push "$GHCR_IMAGE:$t"; done
-
-      - name: Публикация в Nexus
-        run: |
-          for t in $TAGS; do docker push "$NEXUS_IMAGE:$t"; done
 
       - name: Итог
         run: |
@@ -153,6 +128,5 @@ jobs:
             echo "### ${{ matrix.service }} — $VERSION"
             for t in $TAGS; do
               echo "- \`$GHCR_IMAGE:$t\`"
-              echo "- \`$NEXUS_IMAGE:$t\`"
             done
           } >> "$GITHUB_STEP_SUMMARY"
