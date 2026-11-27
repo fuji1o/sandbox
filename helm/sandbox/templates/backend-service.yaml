@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: sandbox-backend
+  ports:
+    - name: http
+      port: {{ .Values.ports.backend }}
+      targetPort: http

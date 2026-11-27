@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main, lab3, lab4]
+    paths:
+      - "src/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          VERSION=$(date -u +%Y%m%d-%H%M%S)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Версия сборки: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            workdir: /src
+            test_cmd: |
+              set -e
+              go install github.com/jstemmer/go-junit-report/v2@v2.1.0
+              set +e
+              CGO_ENABLED=0 go test -v -coverprofile=/reports/coverage.out ./... > /reports/test.log 2>&1
+              rc=$?
+              set -e
+              "$(go env GOPATH)/bin/go-junit-report" < /reports/test.log > /reports/junit.xml
+              [ -f /reports/coverage.out ] && go tool cover -func=/reports/coverage.out > /reports/coverage.txt || true 
+              exit $rc
+
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Собрать builder-стадию
+        run: docker build --target builder -t test-${{ matrix.service }}:ci "src/${{ matrix.service }}"
+
+      - name: Запустить тесты в контейнере
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD/reports:/reports" \
+            -w "${{ matrix.workdir }}" \
+            -e JEST_JUNIT_OUTPUT_DIR=/reports \
+            -e JEST_JUNIT_OUTPUT_NAME=junit.xml \
+            test-${{ matrix.service }}:ci \
+            sh -c "$TEST_CMD"
+        env:
+          TEST_CMD: ${{ matrix.test_cmd }}
+
+      - name: Опубликовать отчёты
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.service }}-test-reports
+          path: reports/
+          if-no-files-found: warn
+
+  build:
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/sandbox-${{ matrix.service }}
+    steps:
+      - name: Получить код
+        uses: actions/checkout@v4
+
+      - name: Вход в ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Сформировать теги
+        run: |
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+          TAGS="$VERSION $SHA_TAG"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAGS="$TAGS latest"
+          fi
+          echo "TAGS=$TAGS" >> "$GITHUB_ENV"
+          echo "Теги: $TAGS"
+
+      - name: Сборка образа
+        run: |
+          args=()
+          for t in $TAGS; do
+            args+=(-t "$GHCR_IMAGE:$t")
+          done
+          docker build --target runtime \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            "${args[@]}" \
+            "src/${{ matrix.service }}"
+
+      - name: Публикация в ghcr.io
+        run: |
+          for t in $TAGS; do docker push "$GHCR_IMAGE:$t"; done
+
+      - name: Итог
+        run: |
+          {
+            echo "### ${{ matrix.service }} — $VERSION"
+            for t in $TAGS; do
+              echo "- \`$GHCR_IMAGE:$t\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

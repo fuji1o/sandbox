@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-backend
+  labels:
+    app: sandbox-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-backend
+  template:
+    metadata:
+      labels:
+        app: sandbox-backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.image.backend }}:{{ .Values.image.tag }}"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: {{ .Values.ports.backend }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
