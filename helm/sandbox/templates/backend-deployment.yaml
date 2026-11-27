@@ -14,6 +14,18 @@ spec:
       labels:
         app: sandbox-backend
     spec:
+      {{- if .Values.database.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ .Values.database.image | quote }}
+          command:
+            - sh
+            - -ec
+            - |
+              until pg_isready -h sandbox-postgres -p 5432; do
+                sleep 2
+              done
+      {{- end }}
       containers:
         - name: backend
           image: "{{ .Values.image.backend }}:{{ .Values.image.tag }}"
@@ -21,5 +33,25 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.ports.backend }}
+          {{- if .Values.database.enabled }}
+          env:
+            - name: DB_ENABLED
+              value: "true"
+            - name: DB_HOST
+              value: sandbox-postgres
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: {{ .Values.database.user | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_SSLMODE
+              value: disable
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: password
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

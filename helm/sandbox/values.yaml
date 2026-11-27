@@ -11,3 +11,12 @@ ports:
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: 500m, memory: 512Mi }
+
+database:
+  enabled: false
+  image: postgres:15-alpine
+  existingSecret: sandbox-postgres-auth
+  user: postgres
+  name: postgres
+  storageClass: yc-network-hdd
+  storage: 1Gi

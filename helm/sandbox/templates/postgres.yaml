@@ -1,0 +1,69 @@
+{{- if .Values.database.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-postgres
+spec:
+  clusterIP: None
+  selector:
+    app: sandbox-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sandbox-postgres
+spec:
+  serviceName: sandbox-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-postgres
+  template:
+    metadata:
+      labels:
+        app: sandbox-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.database.image | quote }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.database.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.database.name | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -h
+                - 127.0.0.1
+                - -p
+                - "5432"
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.database.storageClass | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.database.storage | quote }}
+{{- end }}
